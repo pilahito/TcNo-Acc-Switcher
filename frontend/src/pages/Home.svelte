@@ -23,6 +23,7 @@
   } from "../lib/commandPalette";
   import { reorderItemByCommand, type ReorderCommand } from "../lib/reorderList";
   import { checkForUpdatesManually } from "../lib/checkForUpdates";
+  import { refreshAllPlatformsAccounts } from "../lib/refreshAllAccounts";
   import { closeSearchOverlay, searchOverlayCtrl } from "../stores/searchOverlay";
   import { setPlatformAccountCounts } from "../stores/platformAccountsCache";
   import { prefetchPlatformPages } from "../lib/pageLoaders";
@@ -242,6 +243,11 @@
         run: () => checkForUpdatesManually(),
       },
       {
+        id: "refresh-all-accounts",
+        title: tr("Command_RefreshAllPlatformsAccounts"),
+        run: () => { void refreshAllPlatformsAccounts(); },
+      },
+      {
         id: "suggest-feature",
         title: tr("Command_SuggestFeature"),
         run: () => openFeedbackModal({ mode: "suggestion" }),
@@ -363,6 +369,10 @@
           { label: tr("Context_MoveToStart"), disabled: !canMoveLeft, action: () => { void applyPlatformReorderCommand(platformName, "start"); } },
           { label: tr("Context_MoveToEnd"), disabled: !canMoveRight, action: () => { void applyPlatformReorderCommand(platformName, "end"); } },
         ],
+      },
+      {
+        label: tr("Command_RefreshAllPlatformsAccounts"),
+        action: () => { void refreshAllPlatformsAccounts(); },
       },
     ];
   }

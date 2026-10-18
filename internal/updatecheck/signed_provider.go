@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 
+	"TcNo-Acc-Switcher/internal/appclient"
+
 	"github.com/wailsapp/wails/v3/pkg/updater"
 	"github.com/wailsapp/wails/v3/pkg/updater/providers/github"
 )
@@ -37,6 +39,16 @@ func NewSignedGitHubProvider(cfg github.Config, sigSuffix string) (updater.Provi
 		sigSuffix: sigSuffix,
 		apiBase:   "https://api.github.com",
 	}, nil
+}
+
+// httpClient is the app's shared client, so signature lookups honour offline
+// mode and use the same transport as every other outbound request, rather
+// than http.DefaultClient, which has no timeout at all.
+func httpClient() *http.Client {
+	if appclient.Shared != nil {
+		return appclient.Shared
+	}
+	return http.DefaultClient
 }
 
 func (p *signedGitHubProvider) Name() string { return p.inner.Name() }
@@ -82,7 +94,7 @@ func (p *signedGitHubProvider) fetchSignature(ctx context.Context, version, arti
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "TcNo-Acc-Switcher-Updater")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +139,7 @@ func (p *signedGitHubProvider) downloadSig(ctx context.Context, url string) ([]b
 	}
 	req.Header.Set("User-Agent", "TcNo-Acc-Switcher-Updater")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient().Do(req)
 	if err != nil {
 		return nil, err
 	}

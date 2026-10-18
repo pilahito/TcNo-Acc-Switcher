@@ -8,6 +8,7 @@ import (
 	"os"
 	"reflect"
 
+	"TcNo-Acc-Switcher/internal/accountrefresh"
 	"TcNo-Acc-Switcher/internal/actionlog"
 	"TcNo-Acc-Switcher/internal/app"
 	"TcNo-Acc-Switcher/internal/appclient"
@@ -312,6 +313,7 @@ func serviceList() []application.Service {
 		application.NewService(shortcuts.NewService(platformSvc)),
 		application.NewService(steamBrowserSvc),
 		application.NewService(serverPickerSvc),
+		application.NewService(accountrefresh.NewService(platformSvc, basicSvc, steamSvc)),
 	}
 }
 
