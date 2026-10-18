@@ -13,8 +13,12 @@ import (
 
 	"TcNo-Acc-Switcher/internal/appclient"
 	"TcNo-Acc-Switcher/internal/crashlog"
+	"TcNo-Acc-Switcher/internal/i18n"
 	"TcNo-Acc-Switcher/internal/updatecheck"
+	"TcNo-Acc-Switcher/internal/updaterollback"
 )
+
+var errNoUpdateFallback = errors.New("update check failed and this build has no fallback")
 
 var (
 	launchCheckOnce       sync.Once
@@ -40,7 +44,7 @@ func emitAppUpdateAvailable(message string) {
 	if app == nil {
 		return
 	}
-	const downloadURL = "https://github.com/TCNOco/TcNo-Acc-Switcher/releases/latest"
+	const downloadURL = updatecheck.ReleasesPageURL
 	_ = app.Event.Emit(AppUpdateAvailableEvent, UpdateAvailablePayload{
 		Message:     message,
 		DownloadURL: downloadURL,
@@ -61,8 +65,56 @@ func emitUpdateCheckFailed() {
 
 func (*PlatformService) NotifyLaunchUpdateCheck() {
 	launchCheckOnce.Do(func() {
+		// The frontend calls this once it has loaded and can reach Go, which is
+		// the best sign there is that a freshly installed update works.
+		markUpdateHealthy()
 		go runLaunchUpdateCheck()
 	})
+}
+
+func markUpdateHealthy() {
+	if !updaterollback.Supported() {
+		return
+	}
+	exe, err := updaterollback.ExecutablePath()
+	if err != nil {
+		return
+	}
+	updaterollback.MarkHealthy(exe, appVersionFromBuildConfig())
+}
+
+// armUpdateRollback keeps a copy of the running (old) executable before the
+// updater restarts into rel, so a build that cannot start can be undone.
+func armUpdateRollback(app *application.App, rel *updater.Release) {
+	if rel == nil || !updaterollback.Supported() {
+		return
+	}
+	exe, err := updaterollback.ExecutablePath()
+	if err != nil {
+		return
+	}
+	if err := updaterollback.Arm(exe, appVersionFromBuildConfig(), rel.Version); err != nil && app != nil {
+		// Not fatal: the update still installs, it just cannot be undone
+		// automatically if it fails to start.
+		app.Logger.Warn("update: could not keep previous version for rollback", "error", err)
+	}
+}
+
+// nativeUpdateText localises the OS notifications sent while updating. They
+// are raised from Go, outside the frontend's i18n store.
+func nativeUpdateText(key, fallback string) string {
+	exeDir, err := ResolveExeDir()
+	if err != nil {
+		return fallback
+	}
+	language := "en-US"
+	if s, err := loadSettings(exeDir); err == nil && strings.TrimSpace(s.Language) != "" {
+		language = s.Language
+	}
+	if v := i18n.T(exeDir, language, key, nil); v != "" && v != key {
+		return v
+	}
+	return fallback
 }
 
 func runLaunchUpdateCheck() {
@@ -80,9 +132,14 @@ func runLaunchUpdateCheck() {
 
 	currentVersion := appVersionFromBuildConfig()
 	apiResultCh := make(chan updatecheck.LaunchAPICheckResult, 1)
-	go func() {
-		apiResultCh <- updatecheck.FetchLaunchAPICheck(context.Background(), currentVersion)
-	}()
+	if updatecheck.UsesTcnoVersionAPI {
+		go func() {
+			apiResultCh <- updatecheck.FetchLaunchAPICheck(context.Background(), currentVersion)
+		}()
+	} else {
+		// No fallback for this build: a failed GitHub check is just a failed check.
+		apiResultCh <- updatecheck.LaunchAPICheckResult{Err: errNoUpdateFallback}
+	}
 
 	go runLaunchPlatformsJSONCheck(exeDir)
 
@@ -126,16 +183,19 @@ func EnableAutoRestartAfterUpdate(app *application.App) {
 	// finds a release does not download anything, and announcing one there
 	// tells users an update is being applied behind their back.
 	app.Event.On(updater.EventDownloadStarted, func(*application.CustomEvent) {
-		NotifyNative("tcno-update-downloading", "TcNo Account Switcher", "Downloading the update.", map[string]interface{}{
+		NotifyNative("tcno-update-downloading", "TcNo Account Switcher", nativeUpdateText("Notify_UpdateDownloading", "Downloading the update."), map[string]interface{}{
 			"type": "update-downloading",
 		})
 	})
-	app.Event.On(updater.EventUpdateReady, func(*application.CustomEvent) {
-		NotifyNative("tcno-update-ready", "TcNo Account Switcher", "Update installed. Restarting TcNo Account Switcher.", map[string]interface{}{
+	app.Event.On(updater.EventUpdateReady, func(e *application.CustomEvent) {
+		NotifyNative("tcno-update-ready", "TcNo Account Switcher", nativeUpdateText("Notify_UpdateReady", "Update installed. Restarting TcNo Account Switcher."), map[string]interface{}{
 			"type": "update-ready",
 		})
+		rel, _ := e.Data.(*updater.Release)
 		go func() {
 			defer crashlog.Capture()
+			// Before Restart: the helper it spawns replaces this executable.
+			armUpdateRollback(app, rel)
 			if err := app.Updater.Restart(app.Context()); err != nil {
 				app.Logger.Error("update: Restart", "error", err)
 			}
@@ -325,6 +385,9 @@ func (*PlatformService) CheckForUpdatesManually() string {
 		return result
 	}
 
+	if !updatecheck.UsesTcnoVersionAPI {
+		return "failed"
+	}
 	apiCtx, apiCancel := context.WithTimeout(context.Background(), apiUpdateCheckTimeout)
 	defer apiCancel()
 	return runAPIUpdateCheck(apiCtx)

@@ -143,7 +143,7 @@ func applyWindowSecurityPolicy(options *application.WebviewWindowOptions, develo
 
 func githubUpdaterConfig(guiSettings platform.AppSettings) github.Config {
 	return github.Config{
-		Repository:    "TCNOco/TcNo-Acc-Switcher",
+		Repository:    updatecheck.ReleaseRepository,
 		Prerelease:    guiSettings.PrereleaseUpdates,
 		ChecksumAsset: "SHA256SUMS",
 		AssetMatcher:  updatecheck.GitHubAssetMatcher,
@@ -158,6 +158,10 @@ func RunGUI(params RunGUIParams) {
 	if parsed.Kind == cli.KindOpenPage {
 		platform.SetStartupNavigateHint(parsed.RouteJSONForOpenPage())
 	}
+
+	// First, before anything else starts: this may restore the previous
+	// version and exit if the update just installed keeps failing to start.
+	rollbackToast := checkUpdateRollbackOnBoot()
 
 	syncProtocolRegistration()
 
@@ -235,6 +239,7 @@ func RunGUI(params RunGUIParams) {
 		forwardedCLI.Ready()
 	})
 	registerSecurityLifecycle(wailsApp, lifecycle)
+	scheduleUpdateHealthyMark(wailsApp)
 	if err := platform.SyncAutostartPreference(wailsApp, guiSettings.StartTrayWithWindows, guiSettings.AlwaysRunAsAdmin); err != nil {
 		wailsApp.Logger.Warn("autostart sync", "error", err)
 	}
@@ -266,6 +271,9 @@ func RunGUI(params RunGUIParams) {
 
 	}
 
+	if rollbackToast != "" {
+		EmitToast("warning", rollbackToast, "", 12000)
+	}
 	if params.CrashSubmitted {
 		EmitToast("success", "i18n:Toast_CrashReported", "", 0)
 	}
