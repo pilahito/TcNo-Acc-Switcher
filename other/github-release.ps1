@@ -26,6 +26,11 @@ function Add-CiEnv {
 }
 
 function Get-ReleaseTag {
+  # RELEASE_TAG lets a workflow name the version explicitly (for example when it
+  # is not running from the tag ref itself).
+  if ($env:RELEASE_TAG) {
+    return $env:RELEASE_TAG
+  }
   if ($env:GITHUB_REF_NAME) {
     return $env:GITHUB_REF_NAME
   }

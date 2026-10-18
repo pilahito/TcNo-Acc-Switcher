@@ -18,6 +18,8 @@ import (
 	"TcNo-Acc-Switcher/internal/updaterollback"
 )
 
+var errNoUpdateFallback = errors.New("update check failed and this build has no fallback")
+
 var (
 	launchCheckOnce       sync.Once
 	updaterLastErrorStage atomic.Value // updater.Stage
@@ -42,7 +44,7 @@ func emitAppUpdateAvailable(message string) {
 	if app == nil {
 		return
 	}
-	const downloadURL = "https://github.com/TCNOco/TcNo-Acc-Switcher/releases/latest"
+	const downloadURL = updatecheck.ReleasesPageURL
 	_ = app.Event.Emit(AppUpdateAvailableEvent, UpdateAvailablePayload{
 		Message:     message,
 		DownloadURL: downloadURL,
@@ -130,9 +132,14 @@ func runLaunchUpdateCheck() {
 
 	currentVersion := appVersionFromBuildConfig()
 	apiResultCh := make(chan updatecheck.LaunchAPICheckResult, 1)
-	go func() {
-		apiResultCh <- updatecheck.FetchLaunchAPICheck(context.Background(), currentVersion)
-	}()
+	if updatecheck.UsesTcnoVersionAPI {
+		go func() {
+			apiResultCh <- updatecheck.FetchLaunchAPICheck(context.Background(), currentVersion)
+		}()
+	} else {
+		// No fallback for this build: a failed GitHub check is just a failed check.
+		apiResultCh <- updatecheck.LaunchAPICheckResult{Err: errNoUpdateFallback}
+	}
 
 	go runLaunchPlatformsJSONCheck(exeDir)
 
@@ -378,6 +385,9 @@ func (*PlatformService) CheckForUpdatesManually() string {
 		return result
 	}
 
+	if !updatecheck.UsesTcnoVersionAPI {
+		return "failed"
+	}
 	apiCtx, apiCancel := context.WithTimeout(context.Background(), apiUpdateCheckTimeout)
 	defer apiCancel()
 	return runAPIUpdateCheck(apiCtx)

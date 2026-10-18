@@ -143,7 +143,7 @@ func applyWindowSecurityPolicy(options *application.WebviewWindowOptions, develo
 
 func githubUpdaterConfig(guiSettings platform.AppSettings) github.Config {
 	return github.Config{
-		Repository:    "TCNOco/TcNo-Acc-Switcher",
+		Repository:    updatecheck.ReleaseRepository,
 		Prerelease:    guiSettings.PrereleaseUpdates,
 		ChecksumAsset: "SHA256SUMS",
 		AssetMatcher:  updatecheck.GitHubAssetMatcher,

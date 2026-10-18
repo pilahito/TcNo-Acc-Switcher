@@ -1,0 +1,189 @@
+name: Fork release (pilahito)
+
+# Builds and publishes this fork's own Windows release, signed with the fork's
+# updater key, so installed copies update from pilahito/TcNo-Acc-Switcher and
+# never from the official TCNOco releases.
+#
+# Push a tag named v<MAJOR>.<MINOR>.<PATCH>-pilahito.<N>, for example
+# v4.0.9-pilahito.1:
+#   - tag on a commit that is on master  -> normal GitHub release
+#   - tag on any other branch             -> GitHub pre-release (for testing)
+#
+# The upstream release.yml stays as it is; it only ever runs its build on the
+# canonical TCNOco repository.
+
+on:
+  push:
+    tags:
+      - "v*-pilahito.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GOFLAGS: -mod=mod
+  GOPROXY: https://proxy.golang.org,direct
+  GOSUMDB: sum.golang.org
+  GOTOOLCHAIN: auto
+  WAILS3_VERSION: v3.0.0-beta.16
+  FORK_REPOSITORY: pilahito/TcNo-Acc-Switcher
+
+jobs:
+  windows-release:
+    name: Build, sign and publish (Windows)
+    if: github.repository == 'pilahito/TcNo-Acc-Switcher'
+    runs-on: windows-2022
+    timeout-minutes: 120
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check tag and choose release type
+        id: kind
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-pilahito\.[0-9]+$ ]]; then
+            echo "::error::Tag '$tag' must look like v4.0.9-pilahito.1"
+            exit 1
+          fi
+          git fetch --force origin master:refs/remotes/origin/master
+          commit="$(git rev-parse "${GITHUB_REF}^{commit}")"
+          if git merge-base --is-ancestor "$commit" refs/remotes/origin/master; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $tag is on master: publishing a normal release."
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "Tag $tag is not on master: publishing a pre-release."
+          fi
+
+      - name: Verify release secret
+        shell: pwsh
+        env:
+          UPDATER_KEY: ${{ secrets.UPDATER_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:UPDATER_KEY)) {
+            throw "Missing UPDATER_KEY Actions secret (the fork's updater signing key)."
+          }
+          Write-Host 'Release secret is present.'
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: Verify Go dependency policy
+        run: go test ./internal/dependencypolicy
+
+      - name: Verify updater signing key and fork packages
+        run: go test ./internal/updatecheck ./internal/updaterollback ./internal/accountrefresh
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Install pnpm
+        run: npm install -g pnpm@11.0.8
+
+      - name: Install Windows packaging tools
+        shell: pwsh
+        run: |
+          choco install nsis 7zip -y --no-progress
+          $nsis = "${env:ProgramFiles(x86)}\NSIS"
+          $sevenZip = "$env:ProgramFiles\7-Zip"
+          $env:Path = "$nsis;$sevenZip;$env:Path"
+          Add-Content -Path $env:GITHUB_PATH -Value $nsis
+          Add-Content -Path $env:GITHUB_PATH -Value $sevenZip
+          & "$env:GITHUB_WORKSPACE\other\NSIS\nsis7zplugin.ps1"
+
+      - name: Install Wails CLI
+        shell: pwsh
+        run: |
+          $goBin = Join-Path $env:USERPROFILE "go\bin"
+          $env:Path = "$goBin;$env:Path"
+          Add-Content -Path $env:GITHUB_PATH -Value $goBin
+          go install "github.com/wailsapp/wails/v3/cmd/wails3@$env:WAILS3_VERSION"
+          cmd /c "wails3 version 2>&1"
+
+      - name: Prepare release version
+        shell: pwsh
+        run: .\other\github-release.ps1 -Step PrepareVersion
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Wails bindings
+        run: wails3 generate bindings -f "-tags production,devtools" -clean=true -ts
+
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          PRODUCTION: "true"
+        run: pnpm run build
+
+      - name: Build executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path bin-build | Out-Null
+          Push-Location build
+          wails3 generate icons -input appicon.png -macfilename darwin/icons.icns -windowsfilename windows/icon.ico
+          Pop-Location
+          Copy-Item -Force "$env:GITHUB_WORKSPACE\other\NSIS\img\icon.ico" "$env:GITHUB_WORKSPACE\build\windows\icon.ico"
+          Push-Location build
+          wails3 generate syso -arch amd64 -icon windows/icon.ico -manifest windows/wails.exe.manifest -info windows/info.json -out ..\wails_windows_amd64.syso
+          Pop-Location
+          go build -tags production,devtools -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui" -o bin-build\TcNo-Acc-Switcher.exe
+          Remove-Item -Force *.syso
+
+      # No Authenticode signing here (upstream uses SignPath, which this fork
+      # does not have). The updater signature below is what the in-app updater
+      # checks; Windows SmartScreen may still warn on first download.
+      - name: Sign for the updater and package installer
+        shell: pwsh
+        env:
+          UPDATER_KEY: ${{ secrets.UPDATER_KEY }}
+        run: .\other\github-release.ps1 -Step PackageInstaller -SignedExePath "$env:GITHUB_WORKSPACE\bin-build\TcNo-Acc-Switcher.exe"
+
+      - name: Verify release artifacts
+        shell: pwsh
+        run: |
+          .\other\github-release.ps1 -Step VerifyReleaseArtifacts -SignedInstallerPath "$env:GITHUB_WORKSPACE\build\windows\nsis\TcNo Account Switcher Installer.exe"
+          go run .\other\verify-release\main.go updater-key.pub bin\TcNo-Acc-Switcher.exe bin\TcNo-Acc-Switcher.exe.sig
+          Copy-Item -Force "build\windows\nsis\TcNo Account Switcher Installer.exe" "bin\TcNo Account Switcher Installer.exe"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          draft: false
+          prerelease: ${{ steps.kind.outputs.prerelease }}
+          name: TcNo Account Switcher (pilahito) ${{ github.ref_name }}
+          body: |
+            Build of the [pilahito fork](https://github.com/${{ env.FORK_REPOSITORY }}) of [TcNo Account Switcher](https://github.com/TCNOco/TcNo-Acc-Switcher) (GPL-3.0, by TroubleChute / TCNOco).
+
+            - **TcNo Account Switcher Installer.exe**: installer.
+            - **TcNo-Acc-Switcher.7z**: portable version.
+            - `TcNo-Acc-Switcher.exe`, `.exe.sig`, `SHA256SUMS`: used by the in-app updater, which updates from this fork's releases only.
+
+            The executable is not Authenticode-signed, so Windows SmartScreen may warn the first time you run it.
+          fail_on_unmatched_files: true
+          files: |
+            bin/TcNo Account Switcher Installer.exe
+            bin/TcNo-Acc-Switcher.exe
+            bin/TcNo-Acc-Switcher.exe.sig
+            bin/TcNo-Acc-Switcher.7z
+            bin/SHA256SUMS

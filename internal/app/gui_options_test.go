@@ -88,3 +88,9 @@ func TestGitHubUpdaterConfigUsesPrereleasePreference(t *testing.T) {
 		t.Fatal("Prerelease = false, want true when pre-release updates are enabled")
 	}
 }
+
+func TestGitHubUpdaterConfigUsesForkReleases(t *testing.T) {
+	if got := githubUpdaterConfig(platform.AppSettings{}).Repository; got != "pilahito/TcNo-Acc-Switcher" {
+		t.Fatalf("Repository = %q, want the fork's own releases", got)
+	}
+}
